@@ -1,14 +1,18 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 from app.database import get_db
 from app.schemas.schemas import (
     LiftingTask, LiftingTaskCreate, LiftingTaskUpdate,
     SafetyBriefing, SafetyBriefingCreate, SafetyBriefingUpdate,
-    WeatherRecord, WeatherRecordCreate
+    WeatherRecord, WeatherRecordCreate,
+    WindowReservation, WindowReservationCreate, WindowReservationUpdate,
+    WindowReservationCheckResponse
 )
 from app.services import lifting_service as service
+from app.services import reservation_service
 from app.services.business_rules import BusinessError
+from app.models.models import ReservationStatus
 
 router = APIRouter(prefix="/api/lifting", tags=["吊装任务"])
 
@@ -146,3 +150,98 @@ def list_weather_records(
     if not task:
         raise HTTPException(status_code=404, detail="吊装任务不存在")
     return task.weather_records[:limit]
+
+
+@router.get("/window-reservations", response_model=List[WindowReservation], tags=["窗口预占"])
+def list_window_reservations(
+    skip: int = 0,
+    limit: int = 100,
+    status: Optional[str] = None,
+    site_id: Optional[int] = None,
+    crane_id: Optional[int] = None,
+    db: Session = Depends(get_db)
+):
+    status_enum = None
+    if status:
+        try:
+            status_enum = ReservationStatus(status)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"无效的预占状态: {status}")
+    return reservation_service.get_window_reservations(
+        db, skip=skip, limit=limit, status=status_enum, site_id=site_id, crane_id=crane_id
+    )
+
+
+@router.get("/window-reservations/{reservation_id}", response_model=WindowReservation, tags=["窗口预占"])
+def get_window_reservation(reservation_id: int, db: Session = Depends(get_db)):
+    res = reservation_service.get_window_reservation(db, reservation_id)
+    if not res:
+        raise HTTPException(status_code=404, detail="窗口预占不存在")
+    return res
+
+
+@router.post("/window-reservations", response_model=WindowReservation, tags=["窗口预占"])
+def create_window_reservation(
+    reservation: WindowReservationCreate, db: Session = Depends(get_db)
+):
+    try:
+        return reservation_service.create_window_reservation(db, reservation)
+    except BusinessError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.put("/window-reservations/{reservation_id}", response_model=WindowReservation, tags=["窗口预占"])
+def update_window_reservation(
+    reservation_id: int,
+    reservation: WindowReservationUpdate,
+    db: Session = Depends(get_db)
+):
+    try:
+        return reservation_service.update_window_reservation(db, reservation_id, reservation)
+    except BusinessError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/window-reservations/{reservation_id}", tags=["窗口预占"])
+def delete_window_reservation(reservation_id: int, db: Session = Depends(get_db)):
+    try:
+        reservation_service.delete_window_reservation(db, reservation_id)
+        return {"message": "删除成功"}
+    except BusinessError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/window-reservations/{reservation_id}/recheck", response_model=WindowReservationCheckResponse, tags=["窗口预占"])
+def recheck_window_reservation(reservation_id: int, db: Session = Depends(get_db)):
+    try:
+        return reservation_service.recheck_window_reservation(db, reservation_id)
+    except BusinessError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/window-reservations/{reservation_id}/check-result", response_model=WindowReservationCheckResponse, tags=["窗口预占"])
+def get_check_result(reservation_id: int, db: Session = Depends(get_db)):
+    try:
+        return reservation_service.get_check_result(db, reservation_id)
+    except BusinessError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/window-reservations/{reservation_id}/cancel", response_model=WindowReservation, tags=["窗口预占"])
+def cancel_window_reservation(
+    reservation_id: int,
+    operator: str = "system",
+    db: Session = Depends(get_db)
+):
+    try:
+        return reservation_service.cancel_window_reservation(db, reservation_id, operator)
+    except BusinessError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/window-reservations/{reservation_id}/expire", response_model=WindowReservation, tags=["窗口预占"])
+def expire_window_reservation(reservation_id: int, db: Session = Depends(get_db)):
+    try:
+        return reservation_service.expire_window_reservation(db, reservation_id)
+    except BusinessError as e:
+        raise HTTPException(status_code=400, detail=str(e))

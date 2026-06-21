@@ -2,24 +2,60 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from app.models.models import (
     TransportBatch, Component, RoadCheckpoint, TaskStatus,
-    RoadStatus
+    RoadStatus, WindowReservation, ReservationStatus
 )
 from app.schemas.schemas import (
     TransportBatchCreate, TransportBatchUpdate,
-    RoadCheckpointCreate, RoadCheckpointUpdate
+    RoadCheckpointCreate, RoadCheckpointUpdate,
+    ReservationSummary
 )
 from app.services.business_rules import (
     BusinessError, validate_transition, add_status_history,
-    can_start_transport, can_complete_transport
+    can_start_transport, can_complete_transport, run_reservation_checks
 )
 
 
+def _fill_reservation_summary(db: Session, batch: TransportBatch) -> TransportBatch:
+    site_ids = list(set([c.site_id for c in batch.components if c.site_id]))
+    if not site_ids:
+        return batch
+
+    reservations = db.query(WindowReservation).filter(
+        WindowReservation.site_id.in_(site_ids)
+    ).all()
+
+    total = len(reservations)
+    confirmed = sum(1 for r in reservations if r.status == ReservationStatus.CONFIRMED)
+    pending = sum(1 for r in reservations if r.status == ReservationStatus.PENDING)
+    rejected = sum(1 for r in reservations if r.status == ReservationStatus.REJECTED)
+
+    latest = None
+    if reservations:
+        reservations.sort(key=lambda r: r.created_at, reverse=True)
+        latest = reservations[0]
+
+    batch.window_reservation_summary = ReservationSummary(
+        total=total,
+        confirmed=confirmed,
+        pending=pending,
+        rejected=rejected,
+        latest=latest
+    )
+    return batch
+
+
 def get_transport_batch(db: Session, batch_id: int) -> TransportBatch | None:
-    return db.query(TransportBatch).filter(TransportBatch.id == batch_id).first()
+    batch = db.query(TransportBatch).filter(TransportBatch.id == batch_id).first()
+    if batch:
+        _fill_reservation_summary(db, batch)
+    return batch
 
 
 def get_transport_batch_by_code(db: Session, batch_code: str) -> TransportBatch | None:
-    return db.query(TransportBatch).filter(TransportBatch.batch_code == batch_code).first()
+    batch = db.query(TransportBatch).filter(TransportBatch.batch_code == batch_code).first()
+    if batch:
+        _fill_reservation_summary(db, batch)
+    return batch
 
 
 def get_transport_batches(
@@ -29,7 +65,10 @@ def get_transport_batches(
     query = db.query(TransportBatch)
     if status:
         query = query.filter(TransportBatch.status == status)
-    return query.offset(skip).limit(limit).all()
+    batches = query.offset(skip).limit(limit).all()
+    for b in batches:
+        _fill_reservation_summary(db, b)
+    return batches
 
 
 def create_transport_batch(
@@ -89,6 +128,7 @@ def create_transport_batch(
 
     db.commit()
     db.refresh(db_batch)
+    _fill_reservation_summary(db, db_batch)
     return db_batch
 
 
@@ -105,6 +145,7 @@ def update_transport_batch(
 
     db.commit()
     db.refresh(db_batch)
+    _fill_reservation_summary(db, db_batch)
     return db_batch
 
 
@@ -131,6 +172,7 @@ def start_transport(db: Session, batch_id: int, operator: str = "system") -> Tra
 
     db.commit()
     db.refresh(db_batch)
+    _fill_reservation_summary(db, db_batch)
     return db_batch
 
 
@@ -163,6 +205,7 @@ def complete_transport(
 
     db.commit()
     db.refresh(db_batch)
+    _fill_reservation_summary(db, db_batch)
     return db_batch
 
 
@@ -224,8 +267,22 @@ def update_road_status(
     if remark:
         db_batch.road_remark = remark
 
+    site_ids = list(set([c.site_id for c in db_batch.components if c.site_id]))
+    if site_ids:
+        affected_reservations = db.query(WindowReservation).filter(
+            WindowReservation.site_id.in_(site_ids),
+            WindowReservation.status.in_([
+                ReservationStatus.PENDING,
+                ReservationStatus.CONFIRMED,
+                ReservationStatus.REJECTED
+            ])
+        ).all()
+        for res in affected_reservations:
+            run_reservation_checks(db, res)
+
     db.commit()
     db.refresh(db_batch)
+    _fill_reservation_summary(db, db_batch)
     return db_batch
 
 
@@ -251,6 +308,7 @@ def add_component_to_batch(
 
     db.commit()
     db.refresh(db_batch)
+    _fill_reservation_summary(db, db_batch)
     return db_batch
 
 

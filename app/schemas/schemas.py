@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel, Field
-from app.models.models import ComponentType, TaskStatus, RoadStatus
+from app.models.models import ComponentType, TaskStatus, RoadStatus, ReservationStatus, CheckStatus
 
 
 class WindTurbineSiteBase(BaseModel):
@@ -160,21 +160,6 @@ class TransportBatchUpdate(BaseModel):
     delay_reason: Optional[str] = None
 
 
-class TransportBatch(TransportBatchBase):
-    id: int
-    status: TaskStatus
-    actual_arrival_time: Optional[datetime] = None
-    delay_hours: float
-    weather_delay_hours: float
-    components: List[Component] = []
-    checkpoints: List[RoadCheckpoint] = []
-    created_at: datetime
-    updated_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
 class CraneBase(BaseModel):
     crane_code: str
     crane_type: Optional[str] = None
@@ -300,6 +285,86 @@ class WeatherRecord(WeatherRecordBase):
         from_attributes = True
 
 
+class WindowReservationBase(BaseModel):
+    reservation_code: str
+    site_id: int
+    crane_id: int
+    planned_start_time: datetime
+    planned_end_time: datetime
+    project_manager: Optional[str] = None
+    forecast_wind_speed: Optional[float] = None
+    remarks: Optional[str] = None
+
+
+class WindowReservationCreate(WindowReservationBase):
+    lifting_task_id: Optional[int] = None
+
+
+class WindowReservationUpdate(BaseModel):
+    planned_start_time: Optional[datetime] = None
+    planned_end_time: Optional[datetime] = None
+    project_manager: Optional[str] = None
+    forecast_wind_speed: Optional[float] = None
+    remarks: Optional[str] = None
+
+
+class ReservationCheckResult(BaseModel):
+    check_name: str
+    status: CheckStatus
+    detail: str
+
+
+class WindowReservationCheckResponse(BaseModel):
+    success: bool
+    overall_status: ReservationStatus
+    checks: List[ReservationCheckResult]
+    rejection_reason: Optional[str] = None
+
+
+class WindowReservation(WindowReservationBase):
+    id: int
+    status: ReservationStatus
+    road_check: CheckStatus
+    road_check_detail: Optional[str] = None
+    predecessor_check: CheckStatus
+    predecessor_check_detail: Optional[str] = None
+    safety_briefing_check: CheckStatus
+    safety_briefing_check_detail: Optional[str] = None
+    wind_speed_check: CheckStatus
+    wind_speed_check_detail: Optional[str] = None
+    rejection_reason: Optional[str] = None
+    lifting_task_id: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ReservationSummary(BaseModel):
+    total: int = 0
+    confirmed: int = 0
+    pending: int = 0
+    rejected: int = 0
+    latest: Optional[WindowReservation] = None
+
+
+class TransportBatch(TransportBatchBase):
+    id: int
+    status: TaskStatus
+    actual_arrival_time: Optional[datetime] = None
+    delay_hours: float
+    weather_delay_hours: float
+    components: List[Component] = []
+    checkpoints: List[RoadCheckpoint] = []
+    window_reservation_summary: Optional[ReservationSummary] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class LiftingTaskBase(BaseModel):
     task_code: str
     task_name: Optional[str] = None
@@ -352,6 +417,7 @@ class LiftingTask(LiftingTaskBase):
     components: List[Component] = []
     safety_briefing: Optional[SafetyBriefing] = None
     weather_records: List[WeatherRecord] = []
+    window_reservation: Optional[WindowReservation] = None
     created_at: datetime
     updated_at: datetime
 

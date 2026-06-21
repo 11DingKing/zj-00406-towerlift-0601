@@ -2,7 +2,8 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from app.models.models import (
     LiftingTask, Component, TaskStatus, Crane, WorkTeam,
-    SafetyBriefing, WeatherRecord, WindTurbineSite
+    SafetyBriefing, WeatherRecord, WindTurbineSite,
+    WindowReservation, ReservationStatus
 )
 from app.schemas.schemas import (
     LiftingTaskCreate, LiftingTaskUpdate,
@@ -11,12 +12,26 @@ from app.schemas.schemas import (
 )
 from app.services.business_rules import (
     BusinessError, add_status_history,
-    can_start_lifting, can_complete_lifting, check_wind_speed
+    can_start_lifting, can_complete_lifting, check_wind_speed,
+    run_reservation_checks
 )
 
 
 def get_lifting_task(db: Session, task_id: int) -> LiftingTask | None:
     return db.query(LiftingTask).filter(LiftingTask.id == task_id).first()
+
+
+def _recheck_site_reservations(db: Session, site_id: int):
+    reservations = db.query(WindowReservation).filter(
+        WindowReservation.site_id == site_id,
+        WindowReservation.status.in_([
+            ReservationStatus.PENDING,
+            ReservationStatus.CONFIRMED,
+            ReservationStatus.REJECTED
+        ])
+    ).all()
+    for res in reservations:
+        run_reservation_checks(db, res)
 
 
 def get_lifting_task_by_code(db: Session, task_code: str) -> LiftingTask | None:
@@ -159,6 +174,8 @@ def complete_lifting(
         operator=accepted_by, remark=f"吊装验收完成: {acceptance_result}"
     )
 
+    _recheck_site_reservations(db, db_task.site_id)
+
     db.commit()
     db.refresh(db_task)
     return db_task
@@ -184,6 +201,10 @@ def create_safety_briefing(
         remarks=briefing.remarks
     )
     db.add(db_briefing)
+
+    if briefing.is_completed:
+        _recheck_site_reservations(db, task.site_id)
+
     db.commit()
     db.refresh(db_briefing)
     return db_briefing
@@ -201,6 +222,11 @@ def update_safety_briefing(
     update_data = briefing.model_dump(exclude_unset=True)
     for key, value in update_data.items():
         setattr(db_briefing, key, value)
+
+    if "is_completed" in update_data:
+        task = get_lifting_task(db, db_briefing.lifting_task_id)
+        if task:
+            _recheck_site_reservations(db, task.site_id)
 
     db.commit()
     db.refresh(db_briefing)

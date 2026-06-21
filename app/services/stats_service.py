@@ -3,7 +3,8 @@ from sqlalchemy import func, and_
 from sqlalchemy.orm import Session
 from app.models.models import (
     Component, TransportBatch, LiftingTask, TaskStatus,
-    WindTurbineSite, WeatherRecord, ComponentType
+    WindTurbineSite, WeatherRecord, ComponentType,
+    WindowReservation, ReservationStatus
 )
 
 
@@ -188,6 +189,30 @@ def get_site_lifting_progress(db: Session) -> list[dict]:
             accepted_components / total_components * 100, 2
         ) if total_components > 0 else 0.0
 
+        site_reservations = db.query(WindowReservation).filter(
+            WindowReservation.site_id == site.id
+        ).all()
+
+        reservation_status_count = {}
+        for r in site_reservations:
+            key = r.status.value
+            reservation_status_count[key] = reservation_status_count.get(key, 0) + 1
+
+        confirmed_reservations = [r for r in site_reservations if r.status == ReservationStatus.CONFIRMED]
+        next_reservation = None
+        if confirmed_reservations:
+            future = [r for r in confirmed_reservations if r.planned_start_time >= datetime.utcnow()]
+            if future:
+                future.sort(key=lambda r: r.planned_start_time)
+                nr = future[0]
+                next_reservation = {
+                    "reservation_code": nr.reservation_code,
+                    "planned_start_time": nr.planned_start_time.isoformat() if nr.planned_start_time else None,
+                    "planned_end_time": nr.planned_end_time.isoformat() if nr.planned_end_time else None,
+                    "project_manager": nr.project_manager,
+                    "forecast_wind_speed": nr.forecast_wind_speed
+                }
+
         result.append({
             "site_id": site.id,
             "site_number": site.site_number,
@@ -200,10 +225,82 @@ def get_site_lifting_progress(db: Session) -> list[dict]:
             "task_progress": progress,
             "total_components": total_components,
             "accepted_components": accepted_components,
-            "component_progress": component_progress
+            "component_progress": component_progress,
+            "window_reservations": {
+                "total": len(site_reservations),
+                "by_status": reservation_status_count,
+                "next_confirmed": next_reservation
+            }
         })
 
     return sorted(result, key=lambda x: x["site_number"])
+
+
+def get_reservation_stats(db: Session) -> dict:
+    total_reservations = db.query(WindowReservation).count()
+
+    by_status = {}
+    for status in ReservationStatus:
+        count = db.query(WindowReservation).filter(
+            WindowReservation.status == status
+        ).count()
+        by_status[status.value] = count
+
+    confirmed_rate = round(
+        by_status.get("confirmed", 0) / total_reservations * 100, 2
+    ) if total_reservations > 0 else 0.0
+
+    rejected_rate = round(
+        by_status.get("rejected", 0) / total_reservations * 100, 2
+    ) if total_reservations > 0 else 0.0
+
+    total_road_fail = db.query(WindowReservation).filter(
+        WindowReservation.road_check == "fail"
+    ).count()
+    total_predecessor_fail = db.query(WindowReservation).filter(
+        WindowReservation.predecessor_check == "fail"
+    ).count()
+    total_safety_fail = db.query(WindowReservation).filter(
+        WindowReservation.safety_briefing_check == "fail"
+    ).count()
+    total_wind_fail = db.query(WindowReservation).filter(
+        WindowReservation.wind_speed_check == "fail"
+    ).count()
+
+    rejection_breakdown = {
+        "road_not_clear": total_road_fail,
+        "predecessor_not_accepted": total_predecessor_fail,
+        "safety_briefing_incomplete": total_safety_fail,
+        "wind_speed_over_limit": total_wind_fail
+    }
+
+    now = datetime.utcnow()
+    upcoming = db.query(WindowReservation).filter(
+        WindowReservation.status == ReservationStatus.CONFIRMED,
+        WindowReservation.planned_start_time >= now
+    ).order_by(WindowReservation.planned_start_time).limit(5).all()
+
+    upcoming_list = []
+    for r in upcoming:
+        site = db.query(WindTurbineSite).filter(WindTurbineSite.id == r.site_id).first()
+        upcoming_list.append({
+            "reservation_code": r.reservation_code,
+            "site_number": site.site_number if site else None,
+            "site_name": site.name if site else None,
+            "planned_start_time": r.planned_start_time.isoformat() if r.planned_start_time else None,
+            "planned_end_time": r.planned_end_time.isoformat() if r.planned_end_time else None,
+            "project_manager": r.project_manager,
+            "forecast_wind_speed": r.forecast_wind_speed
+        })
+
+    return {
+        "total": total_reservations,
+        "by_status": by_status,
+        "confirmed_rate": confirmed_rate,
+        "rejected_rate": rejected_rate,
+        "rejection_breakdown": rejection_breakdown,
+        "upcoming_confirmed": upcoming_list
+    }
 
 
 def get_overall_stats(db: Session) -> dict:
@@ -238,6 +335,7 @@ def get_overall_stats(db: Session) -> dict:
 
     ontime_stats = get_components_ontime_rate(db)
     weather_stats = get_weather_delay_stats(db)
+    reservation_stats = get_reservation_stats(db)
 
     return {
         "sites": {
@@ -260,5 +358,10 @@ def get_overall_stats(db: Session) -> dict:
             "by_status": tasks_by_status
         },
         "on_time_rate": ontime_stats["on_time_rate"],
-        "weather_delay_hours": weather_stats["total_weather_delay_hours"]
+        "weather_delay_hours": weather_stats["total_weather_delay_hours"],
+        "window_reservations": {
+            "total": reservation_stats["total"],
+            "by_status": reservation_stats["by_status"],
+            "confirmed_rate": reservation_stats["confirmed_rate"]
+        }
     }

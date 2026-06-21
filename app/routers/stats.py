@@ -29,3 +29,8 @@ def get_weather_delay_stats(db: Session = Depends(get_db)):
 @router.get("/site-progress")
 def get_site_progress(db: Session = Depends(get_db)):
     return stats_service.get_site_lifting_progress(db)
+
+
+@router.get("/window-reservations", tags=["窗口预占"])
+def get_reservation_stats(db: Session = Depends(get_db)):
+    return stats_service.get_reservation_stats(db)

@@ -30,6 +30,20 @@ class RoadStatus(str, enum.Enum):
     RESTRICTED = "restricted"
 
 
+class ReservationStatus(str, enum.Enum):
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+
+
+class CheckStatus(str, enum.Enum):
+    PASS = "pass"
+    FAIL = "fail"
+    PENDING = "pending"
+
+
 class WindTurbineSite(Base):
     __tablename__ = "wind_turbine_sites"
 
@@ -47,6 +61,7 @@ class WindTurbineSite(Base):
 
     lifting_tasks = relationship("LiftingTask", back_populates="site")
     components = relationship("Component", back_populates="site")
+    window_reservations = relationship("WindowReservation", back_populates="site")
 
 
 class Component(Base):
@@ -142,6 +157,7 @@ class Crane(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     lifting_tasks = relationship("LiftingTask", back_populates="crane")
+    window_reservations = relationship("WindowReservation", back_populates="crane")
 
 
 class WorkTeam(Base):
@@ -213,6 +229,7 @@ class LiftingTask(Base):
     safety_briefing = relationship("SafetyBriefing", back_populates="lifting_task", uselist=False)
     predecessor_task = relationship("LiftingTask", remote_side=[id])
     weather_records = relationship("WeatherRecord", back_populates="lifting_task", order_by="WeatherRecord.record_time.desc()")
+    window_reservation = relationship("WindowReservation", back_populates="lifting_task", uselist=False)
 
 
 class WeatherRecord(Base):
@@ -244,3 +261,36 @@ class StatusHistory(Base):
     operator = Column(String(50))
     remark = Column(String(500))
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class WindowReservation(Base):
+    __tablename__ = "window_reservations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    reservation_code = Column(String(100), unique=True, index=True, nullable=False)
+    site_id = Column(Integer, ForeignKey("wind_turbine_sites.id"), nullable=False)
+    crane_id = Column(Integer, ForeignKey("cranes.id"), nullable=False)
+    planned_start_time = Column(DateTime, nullable=False)
+    planned_end_time = Column(DateTime, nullable=False)
+    project_manager = Column(String(50))
+    status = Column(Enum(ReservationStatus), default=ReservationStatus.PENDING, index=True)
+
+    road_check = Column(Enum(CheckStatus), default=CheckStatus.PENDING)
+    road_check_detail = Column(String(500))
+    predecessor_check = Column(Enum(CheckStatus), default=CheckStatus.PENDING)
+    predecessor_check_detail = Column(String(500))
+    safety_briefing_check = Column(Enum(CheckStatus), default=CheckStatus.PENDING)
+    safety_briefing_check_detail = Column(String(500))
+    wind_speed_check = Column(Enum(CheckStatus), default=CheckStatus.PENDING)
+    wind_speed_check_detail = Column(String(500))
+    forecast_wind_speed = Column(Float)
+    rejection_reason = Column(String(500))
+
+    lifting_task_id = Column(Integer, ForeignKey("lifting_tasks.id"))
+    remarks = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    site = relationship("WindTurbineSite", back_populates="window_reservations")
+    crane = relationship("Crane", back_populates="window_reservations")
+    lifting_task = relationship("LiftingTask", back_populates="window_reservation")
