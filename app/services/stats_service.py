@@ -6,6 +6,7 @@ from app.models.models import (
     WindTurbineSite, WeatherRecord, ComponentType,
     WindowReservation, ReservationStatus
 )
+from app.services.business_rules import diagnose_lifting_task_blockers
 
 
 def get_ontime_rate(db: Session) -> dict:
@@ -166,12 +167,28 @@ def get_site_lifting_progress(db: Session) -> list[dict]:
         lifting_tasks = len([
             t for t in site_tasks if t.status == TaskStatus.LIFTING
         ])
-        pending_tasks = len([
+        pending_tasks = [
             t for t in site_tasks if t.status == TaskStatus.PENDING_LIFTING
-        ])
+        ]
+
+        ready_pending = []
+        blocked_pending = []
+        blocker_summary = {}
+        for task in pending_tasks:
+            blockers = diagnose_lifting_task_blockers(db, task)
+            if blockers:
+                blocked_pending.append(task)
+                for b in blockers:
+                    blocker_summary[b] = blocker_summary.get(b, 0) + 1
+            else:
+                ready_pending.append(task)
 
         progress = round(
             accepted_tasks / total_tasks * 100, 2
+        ) if total_tasks > 0 else 0.0
+
+        effective_progress = round(
+            (accepted_tasks + lifting_tasks) / total_tasks * 100, 2
         ) if total_tasks > 0 else 0.0
 
         total_components = db.query(Component).filter(
@@ -201,7 +218,21 @@ def get_site_lifting_progress(db: Session) -> list[dict]:
         confirmed_reservations = [r for r in site_reservations if r.status == ReservationStatus.CONFIRMED]
         next_reservation = None
         if confirmed_reservations:
-            future = [r for r in confirmed_reservations if r.planned_start_time >= datetime.utcnow()]
+            now = datetime.utcnow()
+            future = []
+            for r in confirmed_reservations:
+                if r.planned_start_time < now:
+                    continue
+                lifting_task_id = r.lifting_task_id
+                if lifting_task_id:
+                    related_task = db.query(LiftingTask).filter(
+                        LiftingTask.id == lifting_task_id
+                    ).first()
+                    if related_task and related_task.status == TaskStatus.PENDING_LIFTING:
+                        blockers = diagnose_lifting_task_blockers(db, related_task)
+                        if blockers:
+                            continue
+                future.append(r)
             if future:
                 future.sort(key=lambda r: r.planned_start_time)
                 nr = future[0]
@@ -221,15 +252,30 @@ def get_site_lifting_progress(db: Session) -> list[dict]:
             "total_tasks": total_tasks,
             "accepted_tasks": accepted_tasks,
             "lifting_tasks": lifting_tasks,
-            "pending_tasks": pending_tasks,
+            "pending_tasks": {
+                "total": len(pending_tasks),
+                "ready": len(ready_pending),
+                "blocked": len(blocked_pending),
+                "blocked_details": [
+                    {
+                        "task_code": t.task_code,
+                        "task_name": t.task_name,
+                        "blockers": diagnose_lifting_task_blockers(db, t)
+                    }
+                    for t in blocked_pending
+                ]
+            },
+            "blocker_summary": blocker_summary,
             "task_progress": progress,
+            "effective_progress": effective_progress,
             "total_components": total_components,
             "accepted_components": accepted_components,
             "component_progress": component_progress,
             "window_reservations": {
                 "total": len(site_reservations),
                 "by_status": reservation_status_count,
-                "next_confirmed": next_reservation
+                "next_confirmed": next_reservation,
+                "note": "next_confirmed 已过滤现场条件不满足的窗口预占"
             }
         })
 

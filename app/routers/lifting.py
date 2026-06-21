@@ -37,6 +37,14 @@ def get_task(task_id: int, db: Session = Depends(get_db)):
     return task
 
 
+@router.get("/tasks/{task_id}/blockers")
+def get_task_blockers(task_id: int, db: Session = Depends(get_db)):
+    try:
+        return service.get_task_blockers(db, task_id)
+    except BusinessError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
 @router.post("/tasks", response_model=LiftingTask)
 def create_task(task: LiftingTaskCreate, db: Session = Depends(get_db)):
     try:

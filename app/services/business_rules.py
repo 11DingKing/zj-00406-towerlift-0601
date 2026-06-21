@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from app.models.models import (
     TaskStatus, RoadStatus, Component, TransportBatch,
@@ -93,6 +93,22 @@ def can_start_lifting(db: Session, task_id: int) -> tuple[bool, str]:
     else:
         task.is_predecessor_accepted = True
 
+    transport_batch_ids = list(set([
+        c.transport_batch_id for c in task.components if c.transport_batch_id
+    ]))
+    if transport_batch_ids:
+        batches = db.query(TransportBatch).filter(
+            TransportBatch.id.in_(transport_batch_ids)
+        ).all()
+        closed_batches = [b for b in batches if b.road_status == RoadStatus.CLOSED]
+        if closed_batches:
+            codes = [b.batch_code for b in closed_batches]
+            return False, f"以下运输批次道路未放行: {', '.join(codes)}，无法开始吊装"
+
+    window_ok, wind_msg = _check_weather_window(db, task_id)
+    if not window_ok:
+        return False, wind_msg
+
     if task.current_wind_speed > task.max_allowed_wind_speed:
         return False, f"当前风速 {task.current_wind_speed} m/s 超过允许范围 {task.max_allowed_wind_speed} m/s"
 
@@ -113,6 +129,90 @@ def can_start_lifting(db: Session, task_id: int) -> tuple[bool, str]:
             return False, f"部件 {component.component_code} 状态为 {component.status}，未到场"
 
     return True, "可以开始吊装"
+
+
+def _check_weather_window(db: Session, task_id: int) -> tuple[bool, str]:
+    task = db.query(LiftingTask).filter(LiftingTask.id == task_id).first()
+    if not task:
+        return False, "吊装任务不存在"
+
+    window_threshold = timedelta(hours=2)
+    cutoff = datetime.utcnow() - window_threshold
+
+    recent_records = db.query(WeatherRecord).filter(
+        WeatherRecord.lifting_task_id == task_id,
+        WeatherRecord.record_time >= cutoff
+    ).order_by(WeatherRecord.record_time.desc()).all()
+
+    if not recent_records:
+        return True, "暂无近期天气记录，请留意实时风速"
+
+    over_limit = [r for r in recent_records if not r.is_within_limit]
+    if over_limit:
+        max_wind = max(r.wind_speed for r in recent_records)
+        count = len(over_limit)
+        return False, (
+            f"最近{window_threshold.total_seconds()/3600:.0f}小时内有{count}次风速超标记录 "
+            f"(最高{max_wind} m/s，限制{task.max_allowed_wind_speed} m/s)，天气窗口不满足作业条件"
+        )
+
+    return True, "天气窗口满足作业条件"
+
+
+def diagnose_lifting_task_blockers(
+    db: Session, task: LiftingTask
+) -> list[str]:
+    blockers = []
+
+    site = db.query(WindTurbineSite).filter(WindTurbineSite.id == task.site_id).first()
+    if site and not site.foundation_accepted:
+        blockers.append("机位基础未验收")
+
+    if task.predecessor_task_id:
+        predecessor = db.query(LiftingTask).filter(
+            LiftingTask.id == task.predecessor_task_id
+        ).first()
+        if predecessor and predecessor.status != TaskStatus.ACCEPTED:
+            blockers.append("上一段塔筒未验收")
+
+    transport_batch_ids = list(set([
+        c.transport_batch_id for c in task.components if c.transport_batch_id
+    ]))
+    if transport_batch_ids:
+        batches = db.query(TransportBatch).filter(
+            TransportBatch.id.in_(transport_batch_ids)
+        ).all()
+        for b in batches:
+            if b.road_status == RoadStatus.CLOSED:
+                blockers.append(f"运输批次{b.batch_code}道路关闭")
+            elif b.road_status == RoadStatus.RESTRICTED:
+                blockers.append(f"运输批次{b.batch_code}道路受限")
+            if b.status in [TaskStatus.PENDING_TRANSPORT, TaskStatus.IN_TRANSIT]:
+                blockers.append(f"运输批次{b.batch_code}未到达（状态: {b.status.value}）")
+
+    for component in task.components:
+        if component.status not in [TaskStatus.ARRIVED, TaskStatus.PENDING_LIFTING, TaskStatus.LIFTING, TaskStatus.ACCEPTED]:
+            blockers.append(f"部件{component.component_code}未到场（状态: {component.status.value}）")
+
+    window_ok, wind_msg = _check_weather_window(db, task.id)
+    if not window_ok:
+        blockers.append(wind_msg)
+
+    if task.current_wind_speed > task.max_allowed_wind_speed:
+        blockers.append(
+            f"当前风速 {task.current_wind_speed} m/s 超过允许范围 {task.max_allowed_wind_speed} m/s"
+        )
+
+    if task.crane_id is None:
+        blockers.append("未安排吊车")
+
+    if task.work_team_id is None:
+        blockers.append("未安排作业班组")
+
+    if task.safety_briefing is None or not task.safety_briefing.is_completed:
+        blockers.append("未完成安全交底")
+
+    return blockers
 
 
 def can_complete_lifting(db: Session, task_id: int) -> tuple[bool, str]:

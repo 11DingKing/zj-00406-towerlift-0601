@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from app.models.models import (
     LiftingTask, Component, TaskStatus, Crane, WorkTeam,
@@ -13,7 +13,7 @@ from app.schemas.schemas import (
 from app.services.business_rules import (
     BusinessError, add_status_history,
     can_start_lifting, can_complete_lifting, check_wind_speed,
-    run_reservation_checks
+    run_reservation_checks, diagnose_lifting_task_blockers, _check_weather_window
 )
 
 
@@ -257,6 +257,49 @@ def add_weather_record(
 
     task.current_wind_speed = record.wind_speed
 
+    window_ok, _ = _check_weather_window(db, task.id)
+    if not window_ok and task.status in [TaskStatus.PENDING_LIFTING, TaskStatus.LIFTING]:
+        est_weather_delay = 2.0
+        task.weather_delay_hours = (task.weather_delay_hours or 0) + est_weather_delay
+
+        if task.status == TaskStatus.LIFTING:
+            old_status = task.status
+            task.status = TaskStatus.PENDING_LIFTING
+            for comp in task.components:
+                if comp.status == TaskStatus.LIFTING:
+                    comp.status = TaskStatus.PENDING_LIFTING
+            add_status_history(
+                db, "lifting_task", task.id,
+                old_status, TaskStatus.PENDING_LIFTING,
+                remark=f"天气原因暂停吊装（风速 {record.wind_speed} m/s，持续超标），天气延误{est_weather_delay}小时"
+            )
+
+        if task.status == TaskStatus.PENDING_LIFTING and task.planned_start_time:
+            shift_delta = timedelta(hours=est_weather_delay)
+            old_start = task.planned_start_time
+            old_end = task.planned_end_time
+            task.planned_start_time = old_start + shift_delta
+            if old_end:
+                task.planned_end_time = old_end + shift_delta
+
+            existing_reason = task.delay_reason or ""
+            weather_reason = f"天气窗口不满足，顺延{est_weather_delay}小时"
+            if existing_reason:
+                task.delay_reason = f"{existing_reason}; {weather_reason}"
+            else:
+                task.delay_reason = weather_reason
+
+            if task.window_reservation and task.window_reservation.status in [
+                ReservationStatus.PENDING,
+                ReservationStatus.CONFIRMED
+            ]:
+                res = task.window_reservation
+                res.planned_start_time = task.planned_start_time
+                res.planned_end_time = task.planned_end_time
+                run_reservation_checks(db, res)
+
+        _recheck_site_reservations(db, task.site_id)
+
     db.commit()
     db.refresh(db_record)
     return db_record
@@ -281,6 +324,26 @@ def add_components_to_task(
     db.commit()
     db.refresh(db_task)
     return db_task
+
+
+def get_task_blockers(db: Session, task_id: int) -> dict:
+    task = get_lifting_task(db, task_id)
+    if not task:
+        raise BusinessError("吊装任务不存在")
+
+    blockers = diagnose_lifting_task_blockers(db, task)
+    can_start = len(blockers) == 0 and task.status == TaskStatus.PENDING_LIFTING
+
+    return {
+        "task_id": task.id,
+        "task_code": task.task_code,
+        "status": task.status,
+        "can_start": can_start,
+        "blockers": blockers,
+        "planned_start_time": task.planned_start_time.isoformat() if task.planned_start_time else None,
+        "planned_end_time": task.planned_end_time.isoformat() if task.planned_end_time else None,
+        "delay_reason": task.delay_reason,
+    }
 
 
 def pause_lifting(
